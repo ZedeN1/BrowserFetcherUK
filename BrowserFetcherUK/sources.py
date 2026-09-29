@@ -10,9 +10,9 @@ Each source fetches one page of raw records at a time and turns them into
 small records {"id", "name": "UK EA: Flood Risk Areas", "services": {"WMS": url}}.
 Only records with at least one map service are kept.
 
-"use" says which fetch runs a source: "quick" (Fetch latest data), "full"
-(Full fetch) or "both". Sources with the same "slot" replace each other: the
-England slot comes from CKAN in a quick fetch and from DEFRA in a full one.
+"use" says which fetch runs a source: "quick" (Fast fetch), "full"
+(Slow fetch) or "both". Sources with the same "slot" replace each other: the
+England slot comes from CKAN in a fast fetch and from DEFRA in a slow one.
 """
 import copy
 import json

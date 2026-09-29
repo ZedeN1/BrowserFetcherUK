@@ -23,11 +23,15 @@ class LockLost(Exception):
     pass
 
 
+# No "Task complete" pop-ups for quick background work.
+SILENT = QgsTask.Flag.CanCancel | QgsTask.Flag.Silent
+
+
 class _Task(QgsTask):
     message = pyqtSignal(str)
 
-    def __init__(self, description):
-        super().__init__(description, QgsTask.Flag.CanCancel)
+    def __init__(self, description, flags=SILENT):
+        super().__init__(description, flags)
         self.feedback = QgsFeedback()
         self.error = None
 
@@ -48,7 +52,14 @@ class _Task(QgsTask):
 
 
 class SourceTask(_Task):
-    """Fetch every page of one catalogue into its work file."""
+    """Fetch every page of one catalogue into its work file.
+
+    Progress goes out as counted(key, records done, total) for the dialog's
+    per-source bars; only milestones and problems go to the log (page by page
+    progress is written to update.log only).
+    """
+
+    counted = pyqtSignal(str, int, int)
 
     def __init__(self, source, folder, lock):
         super().__init__(f"Browser Fetcher: {source.LABEL}")
@@ -94,12 +105,14 @@ class SourceTask(_Task):
         total = work.get("total")
         if work.get("complete"):
             self.complete = True
+            self.counted.emit(src.KEY, offset, total or offset)
             self.log(f"{src.LABEL}: already fetched ({offset} records)")
             return
+        self.counted.emit(src.KEY, offset, total or 0)
         if offset:
             self.log(f"{src.LABEL}: resuming at record {offset}" + (f" of {total}" if total else ""))
         else:
-            self.log(f"{src.LABEL}: starting")
+            self.log_detail(f"{src.LABEL}: starting")
 
         while not self.isCanceled():
             if total is not None and offset >= total:
@@ -110,7 +123,7 @@ class SourceTask(_Task):
             count, raw = raw
             if total is None and count is not None:
                 total = work["total"] = count
-                self.log(f"{src.LABEL}: {total} records in the catalogue")
+                self.log_detail(f"{src.LABEL}: {total} records in the catalogue")
             if not raw:
                 break
             pages[str(offset)] = {"count": len(raw), "records": src.parse(raw)}
@@ -118,7 +131,8 @@ class SourceTask(_Task):
             offset += len(raw)
             if total:
                 self.setProgress(min(100.0, 100.0 * offset / total))
-                self.log(f"{src.LABEL}: {min(offset, total)} / {total}")
+                self.counted.emit(src.KEY, min(offset, total), total)
+                self.log_detail(f"{src.LABEL}: {min(offset, total)} / {total}")
             self.sleep(BASE_SLEEP)
 
         if not self.isCanceled():
@@ -126,6 +140,7 @@ class SourceTask(_Task):
             self.save(work)
             self.complete = True
             self.setProgress(100.0)
+            self.counted.emit(src.KEY, total or offset, total or offset)
             kept = sum(len(p["records"]) for p in pages.values())
             self.log(f"{src.LABEL}: done, {kept} datasets with map services")
 
@@ -184,7 +199,9 @@ class FetchTask(_Task):
         full_only: keys of sources used only by a full fetch (DEFRA). In a quick fetch,
         their datasets that the quick source of the same slot does not have (MMO ones
         missing from data.gov.uk) are carried over, until a full fetch drops them."""
-        super().__init__("Browser Fetcher: updating connection list")
+        # A slow fetch runs for an hour or more: let QGIS say when it is done.
+        super().__init__("Browser Fetcher: " + ("slow fetch" if full else "fast fetch"),
+                         QgsTask.Flag.CanCancel if full else SILENT)
         self.folder = folder
         self.lock = lock
         self.on_finished = on_finished
@@ -250,7 +267,7 @@ class FetchTask(_Task):
                             info[k] = dict(prev_sources.get(k, {"label": k}), slot=slot,
                                            carried=sum(d["source"] == k for d in carried))
                         self.log(f"{label}: kept {len(carried)} datasets found only by the last "
-                                 f"full fetch")
+                                 f"slow fetch")
             else:
                 self.warn(f"{label}: keeping the {len(old)} datasets from the previous copy")
                 datasets += old
@@ -289,39 +306,67 @@ class StatusTask(_Task):
     """Reads a data folder (can hang for a while on an unreachable network drive)."""
 
     def __init__(self, settings, on_finished):
-        super().__init__("Browser Fetcher: reading data folder")
+        super().__init__("Browser Fetcher: reading data folder", SILENT | QgsTask.Flag.Hidden)
         self.settings = settings
         self.on_finished = on_finished
-        self.evy_detected = None  # set on first run, when EVY mode was never chosen
-        self.folder = settings["local"]
-        self.origin = "local"
-        self.fell_back = False
-        self.reachable = False
-        self.snapshot = None
+        self.evy = settings["evy"]
+        self.local_folder = settings["local"]
+        self.shared_folder = settings["shared"]
+        self.shared_ok = False
+        self.fell_back = False       # EVY staff, but the shared folder cannot be reached
+        self.local_snapshot = None
+        self.shared_snapshot = None
+        self.local_work_keys = []
+        # Where fetches go (shared folder for EVY staff when reachable), its lock and unfinished work.
+        self.folder = self.local_folder
         self.lock = None
         self.work_keys = []
+        # The copy to use: the newer of the shared and local ones.
+        self.snapshot = None
+        self.origin = "local"
+        self.snapshot_folder = self.local_folder
+        self.local_newer = False     # EVY staff with a local copy newer than the shared one
+        self.reachable = False
 
     def run(self):
         try:
-            evy = self.settings["evy"]
-            if evy is None:
-                evy = self.evy_detected = os.path.isdir(self.settings["shared"])
+            evy = self.evy
+            os.makedirs(self.local_folder, exist_ok=True)
+            self.local_snapshot = store.read_snapshot(self.local_folder)
+            self.local_work_keys = store.work_keys(self.local_folder)
             if evy:
-                if os.path.isdir(self.settings["shared"]):
-                    self.folder, self.origin = self.settings["shared"], "shared"
-                else:
-                    self.fell_back = True
-            if self.origin == "local":
-                os.makedirs(self.folder, exist_ok=True)
-            self.reachable = os.path.isdir(self.folder)
-            if self.reachable:
-                self.snapshot = store.read_snapshot(self.folder)
-                self.lock = store.read_lock(self.folder)
-                self.work_keys = store.work_keys(self.folder)
+                self.shared_ok = os.path.isdir(self.shared_folder)
+                self.fell_back = not self.shared_ok
+            if self.shared_ok:
+                self.folder = self.shared_folder
+                self.shared_snapshot = store.read_snapshot(self.shared_folder)
+                self.lock = store.read_lock(self.shared_folder)
+                self.work_keys = store.work_keys(self.shared_folder)
+            else:
+                self.lock = store.read_lock(self.local_folder)
+                self.work_keys = self.local_work_keys
+            self.reachable = True
+
+            local_time = (self.local_snapshot or {}).get("created", "")
+            shared_time = (self.shared_snapshot or {}).get("created", "")
+            if self.shared_ok and shared_time >= local_time:
+                self.snapshot, self.origin, self.snapshot_folder = (
+                    self.shared_snapshot, "shared", self.shared_folder)
+            else:
+                self.snapshot = self.local_snapshot
+                self.local_newer = self.shared_ok and bool(local_time)
             return True
         except Exception as e:
             self.error = str(e)
             return False
+
+    @property
+    def can_copy_to_shared(self):
+        """A newer local copy from a complete slow fetch, which is worth sharing (fast ones
+        take seconds to refetch into the shared folder instead)."""
+        snap = self.local_snapshot or {}
+        return (self.local_newer and snap.get("full")
+                and all(i.get("complete", True) for i in snap.get("sources", {}).values()))
 
     def finished(self, result):
         self.on_finished(self, result)

@@ -11,7 +11,6 @@ Data folder layout (the shared NAS folder for EVY staff, else the local folder):
 The QGIS profile folder holds what this user has applied (applied.json) and
 which connections the plugin owns (owned.json).
 """
-import csv
 import getpass
 import glob
 import json
@@ -26,8 +25,9 @@ from qgis.core import QgsApplication, QgsSettings
 PROFILE_DIR = os.path.normpath(os.path.join(QgsApplication.qgisSettingsDirPath(), "BrowserFetcherUK"))
 APPLIED_PATH = os.path.join(PROFILE_DIR, "applied.json")
 
-SHARED_DEFAULT = (r"O:\0000_ElectronicLibrary\Computing\Software\GIS\QGIS\Gov_API" if os.name == "nt"
-                  else "/net/O/0000_ElectronicLibrary/Computing/Software/GIS/QGIS/Gov_API")
+SHARED_DEFAULT = (r"O:\0000_ElectronicLibrary\Computing\Software\GIS\QGIS\plugins\Browser_Fetcher_UK_cache"
+                  if os.name == "nt" else
+                  "/net/O/0000_ElectronicLibrary/Computing/Software/GIS/QGIS/plugins/Browser_Fetcher_UK_cache")
 LOCAL_DEFAULT = PROFILE_DIR
 
 SETTINGS = "BrowserFetcherUK/"
@@ -40,14 +40,27 @@ HEARTBEAT_SECONDS = 60
 
 
 # ------------------------------------------------------------------ settings
+# Fast fetch reuses a copy younger than this many hours instead of fetching (0: always fetch).
+REUSE_HOURS_DEFAULT = 24
+# Fast fetch suggests a slow fetch once the last one is older than this many days (0: never).
+SLOW_DAYS_DEFAULT = 30
+
+
 def settings():
+    """Saved choices; each is kept until the user changes it."""
     s = QgsSettings()
-    evy = s.value(SETTINGS + "evy_mode", None)
     return {
-        "evy": None if evy is None else evy in (True, "true", "True", 1, "1"),
+        "evy": s.value(SETTINGS + "evy_mode", True, type=bool),
         "shared": s.value(SETTINGS + "shared_folder", "") or SHARED_DEFAULT,
         "local": s.value(SETTINGS + "local_folder", "") or LOCAL_DEFAULT,
+        "reuse_hours": s.value(SETTINGS + "reuse_hours", REUSE_HOURS_DEFAULT, type=int),
+        "slow_days": s.value(SETTINGS + "slow_days", SLOW_DAYS_DEFAULT, type=int),
+        "slow_snoozed_until": s.value(SETTINGS + "slow_snoozed_until", "") or "",
     }
+
+
+def set_setting(key, value):
+    QgsSettings().setValue(SETTINGS + key, value)
 
 
 def save_settings(evy, shared, local):

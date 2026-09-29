@@ -121,11 +121,31 @@ def parse_xml_file(path):
     return conns
 
 
+BUILTIN, BUILTIN_EVY, CUSTOM = "Built-in", "Built-in (EVY)", "Custom"
+
+
+def builtin_connections(evy):
+    """Built-in connections tagged with their source; the EVY ones only for EVY staff."""
+    conns = _tagged(parse_xml_lines(static.PUBLIC), BUILTIN)
+    if evy:
+        conns += _tagged(parse_xml_lines(static.EVY), BUILTIN_EVY)
+    return conns
+
+
+def conn_key(c):
+    return [c["kind"], c["name"]]
+
+
 def load_custom():
-    """{"include_builtin": bool, "connections": [...]} from the profile."""
+    """{"disabled": [[kind, name]] of built-in connections switched off,
+    "connections": [...] the user's own, each with "enabled"} from the profile."""
     data = store.read_json(CUSTOM_PATH) or {}
-    return {"include_builtin": data.get("include_builtin", True),
-            "connections": [c for c in data.get("connections", []) if c.get("kind") in KINDS]}
+    disabled = [list(k) for k in data.get("disabled", [])]
+    if data.get("include_builtin") is False:  # v0.01 had one switch for all built-in ones
+        disabled += [conn_key(c) for c in parse_xml_lines(static.PUBLIC)]
+    conns = [dict(c, enabled=c.get("enabled", True)) for c in data.get("connections", [])
+             if c.get("kind") in KINDS]
+    return {"disabled": disabled, "connections": conns}
 
 
 def save_custom(data):
@@ -154,15 +174,15 @@ def _tagged(conns, source):
 
 
 def static_connections(evy, custom=None):
-    """Built-in connections (unless switched off), EVY ones for EVY staff, then the user's own.
+    """Ticked built-in connections (EVY ones for EVY staff only), then the user's own ticked ones.
 
     "source" on each connection is for the change list only; it is not written to QGIS.
     """
     custom = custom or load_custom()
-    conns = _tagged(parse_xml_lines(static.PUBLIC), "Built-in") if custom["include_builtin"] else []
-    if evy:
-        conns += _tagged(parse_xml_lines(static.EVY), "Built-in (EVY)")
-    return conns + [dict(c, attrs=dict(c["attrs"]), source="Custom") for c in custom["connections"]]
+    disabled = {tuple(k) for k in custom["disabled"]}
+    conns = [c for c in builtin_connections(evy) if (c["kind"], c["name"]) not in disabled]
+    return conns + [{"kind": c["kind"], "name": c["name"], "attrs": dict(c["attrs"]), "source": CUSTOM}
+                    for c in custom["connections"] if c.get("enabled", True)]
 
 
 def dataset_connections(datasets, source_info=None):
