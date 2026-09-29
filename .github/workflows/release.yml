@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install qgis-plugin-ci
+        run: pip install qgis-plugin-ci
+
+      - name: Create GitHub release
+        run: gh release create ${{ github.ref_name }} --generate-notes --title "${{ github.ref_name }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package and upload plugin
+        run: qgis-plugin-ci release ${GITHUB_REF_NAME#v} --release-tag ${GITHUB_REF_NAME} --github-token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update qgis-plugins repository
+        env:
+          PLUGINS_REPO_TOKEN: ${{ secrets.PLUGINS_REPO_TOKEN }}
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          TAG=${{ github.ref_name }}
+          DOWNLOAD_URL="https://github.com/ZedeN1/BrowserFetcherUK/releases/download/${TAG}/BrowserFetcherUK.${VERSION}.zip"
+
+          git clone https://x-access-token:${PLUGINS_REPO_TOKEN}@github.com/ZedeN1/qgis-plugins.git _repo
+          cd _repo
+          python3 update_plugin.py plugins.xml "Browser Fetcher UK" "${VERSION}" "${DOWNLOAD_URL}"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add plugins.xml
+          git diff --staged --quiet || git commit -m "chore: update Browser Fetcher UK to ${TAG}"
+          git push

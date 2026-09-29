@@ -1,0 +1,23 @@
+[general]
+name=Browser Fetcher UK
+qgisMinimumVersion=3.30
+qgisMaximumVersion=4.99
+description=Adds UK government map services (DEFRA / Environment Agency, Scotland, Wales, BGS, CEH) to the QGIS Browser as WMS, WFS, WCS, XYZ and vector tile connections, and keeps them up to date.
+version=0.01
+author=Pavel Diptan
+email=pdiptan@gmail.com
+about=Searches the public data catalogues of England (data.gov.uk, or the complete DEFRA catalogue), Scotland (Spatial Data Scotland) and Wales (Natural Resources Wales), picks out every dataset with a map service, and adds them to the QGIS Browser as connections (about 3,000), together with BGS, UKCEH, OpenStreetMap and Mapzen services.
+
+    - Only the connections the plugin added are replaced on update; your own connections are never touched.
+    - Fetch latest data takes under a minute. Full fetch uses the complete DEFRA catalogue (adds Marine Management Organisation datasets missing from data.gov.uk) and takes an hour or more; its progress is saved after every page, so it resumes where it stopped. Datasets only a full fetch finds are kept by later quick fetches.
+    - A shared folder (e.g. on a network drive) lets one person fetch and everyone else update their Browser in seconds. An update lock stops two people running it at once.
+    - Shows a short list of what changed (new, removed, updated and retired datasets, with their source) and keeps a history of changes.
+    - Add your own connections (import QGIS connection XML files or pick them from the Browser) and edit the list of catalogues searched; both can be exported and shared.
+    - Exports all connections as QGIS XML files.
+tracker=https://github.com/ZedeN1/BrowserFetcherUK/issues
+repository=https://github.com/ZedeN1/BrowserFetcherUK
+homepage=https://github.com/ZedeN1/BrowserFetcherUK
+category=Web
+icon=icon.png
+tags=wms,wfs,wcs,wmts,xyz,vector tiles,browser,connections,defra,environment agency,scotland,wales,bgs,ceh,uk
+experimental=True
