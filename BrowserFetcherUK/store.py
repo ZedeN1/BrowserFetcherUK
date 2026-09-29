@@ -96,18 +96,18 @@ def age_minutes(iso):
 
 
 def describe(iso):
-    """'29 Sep 2026 10:15 (today)' in local time."""
+    """'2026-09-29 10:15 (today)' in local time."""
     when = parse_time(iso).astimezone()
     days = (datetime.now().astimezone().date() - when.date()).days
     age = "today" if days <= 0 else "yesterday" if days == 1 else f"{days} days ago"
-    return f"{when:%d %b %Y %H:%M} ({age})"
+    return f"{when:%Y-%m-%d %H:%M} ({age})"
 
 
 def hhmm(iso):
     when = parse_time(iso).astimezone()
     if when.date() == datetime.now().astimezone().date():
         return f"{when:%H:%M}"
-    return f"{when:%d %b %H:%M}"
+    return f"{when:%Y-%m-%d %H:%M}"
 
 
 def read_json(path):

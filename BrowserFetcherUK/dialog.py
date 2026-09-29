@@ -38,6 +38,7 @@ class BrowserFetcherDialog(QDialog):
         self.rows = []            # rows shown in the Changes table
         self.pending = []         # what Apply would change
         self.bars = {}            # source key -> (label, progress bar) while fetching
+        self.legacy_found = []    # old-script connections Apply would not replace
         self.setWindowTitle(TITLE)
         self.resize(900, 800)
 
@@ -133,6 +134,19 @@ class BrowserFetcherDialog(QDialog):
         header.setStretchLastSection(True)
         self.table.setMinimumHeight(200)
         cl.addWidget(self.table, 1)
+        legacy_row = QHBoxLayout()
+        self.legacy_label = QLabel()
+        self.legacy_label.setWordWrap(True)
+        self.legacy_label.setStyleSheet(f"color: {WARN};")
+        legacy_row.addWidget(self.legacy_label, 1)
+        self.legacy_btn = QPushButton("Remove them...")
+        self.legacy_btn.clicked.connect(self.remove_legacy)
+        legacy_row.addWidget(self.legacy_btn)
+        self.legacy_widget = QWidget()
+        self.legacy_widget.setLayout(legacy_row)
+        legacy_row.setContentsMargins(0, 0, 0, 0)
+        self.legacy_widget.hide()
+        cl.addWidget(self.legacy_widget)
         bottom = QHBoxLayout()
         self.counts_label = QLabel()
         bottom.addWidget(self.counts_label, 1)
@@ -340,7 +354,7 @@ class BrowserFetcherDialog(QDialog):
 
     @staticmethod
     def _sources_text(snap):
-        """'England 617 (data.gov.uk) + 93 only in the slow fetch of 22 Sep · Scotland 625 · Wales 214'.
+        """'England 617 (data.gov.uk) + 93 only in the slow fetch of 2026-09-22 · Scotland 625 · Wales 214'.
         Dates only where they differ from the copy's own."""
         if not snap:
             return ""
@@ -352,7 +366,7 @@ class BrowserFetcherDialog(QDialog):
             if not when:
                 return ""
             day = store.parse_time(when).astimezone()
-            return "" if day.date() == created else f"{day:%d %b}"
+            return "" if day.date() == created else f"{day:%Y-%m-%d}"
 
         parts = []
         for key, info in snap.get("sources", {}).items():
@@ -360,7 +374,7 @@ class BrowserFetcherDialog(QDialog):
             region, _, detail = label.partition(" (")
             n = counts.get(key, 0)
             if info.get("carried"):
-                when = (f"{store.parse_time(info['fetched']).astimezone():%d %b}"
+                when = (f"{store.parse_time(info['fetched']).astimezone():%Y-%m-%d}"
                         if info.get("fetched") else "earlier")
                 parts[-1:] = [f"{parts[-1]} + {n:,} only in the slow fetch of {when}"] if parts else []
                 continue
@@ -416,13 +430,35 @@ class BrowserFetcherDialog(QDialog):
         self.cancel_btn.setEnabled(busy)
 
     # ------------------------------------------------------------------- changes
+    @staticmethod
+    def _browser_now(conns):
+        """The real Browser for these connections (it may have been changed outside the plugin),
+        labelled with the sources recorded at the last Apply."""
+        labels = {(c["kind"], c["name"]): c.get("source", "")
+                  for c in (store.read_applied() or {}).get("connections", [])}
+        current = connections.read_browser(conns)
+        for c in current:
+            c["source"] = labels.get((c["kind"], c["name"]), "")
+        return current
+
     def _pending_rows(self):
         st = self.status
         if not st or not st.snapshot:
+            self._show_legacy(set())
             return []
-        applied = store.read_applied() or {}
         new = connections.build(st.snapshot, self.evy_cb.isChecked())
-        return changes.diff(applied.get("connections", []), new)
+        self._show_legacy({(connections.KINDS[c["kind"]][0], c["name"]) for c in new})
+        return changes.diff(self._browser_now(new), new)
+
+    def _show_legacy(self, targets):
+        """Note old-script connections that Apply will not replace (no longer in the list)."""
+        leftover = [x for x in connections.find_legacy() if x not in targets]
+        self.legacy_found = leftover
+        if leftover:
+            self.legacy_label.setText(
+                f"{len(leftover):,} connections in your Browser look like old-script ones (e.g. "
+                f"\"{leftover[0][1]}\") and are not in the current list, so Apply leaves them alone.")
+        self.legacy_widget.setVisible(bool(leftover))
 
     def _fill_view_combo(self, select=None):
         self.pending = self._pending_rows()
@@ -518,8 +554,7 @@ class BrowserFetcherDialog(QDialog):
         evy = self.evy_cb.isChecked()
         snapshot = st.snapshot
         conns = connections.build(snapshot, evy)
-        applied = store.read_applied() or {}
-        rows = changes.diff(applied.get("connections", []), conns)
+        rows = changes.diff(self._browser_now(conns), conns)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             added, removed, skipped = connections.apply(conns, self.log)
@@ -571,12 +606,14 @@ class BrowserFetcherDialog(QDialog):
             self.log(f"Removed {count:,} connections added by the old script.")
 
     def remove_legacy(self):
-        found = connections.find_legacy()
+        # From the note under the table: only the leftovers; from Settings: every old-script one.
+        found = (self.legacy_found if self.sender() is self.legacy_btn else None) or connections.find_legacy()
         store.set_legacy_checked()
         if not found:
             QMessageBox.information(self, TITLE, "No connections from the old script found.")
             return
         self._ask_remove_legacy(found)
+        self._fill_view_combo()
 
     def remove_owned(self):
         reply = QMessageBox.question(self, TITLE, "Remove every connection this plugin added "

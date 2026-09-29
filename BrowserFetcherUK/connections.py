@@ -250,11 +250,30 @@ def write_connection(qs, group, conn):
         qs.setValue(f"{path}/http-header", headers)
 
 
+def read_browser(conns):
+    """What the QGIS Browser holds now for the plugin's own connections and for the names of
+    conns, as connection dicts (URL only): lets the change list compare with the real Browser,
+    which may have been changed outside the plugin."""
+    qs = QSettings()
+    owned = load_owned()
+    wanted = {}
+    for c in conns:
+        wanted.setdefault(KINDS[c["kind"]][0], set()).add(c["name"])
+    out = []
+    for kind, (group, *_) in KINDS.items():
+        names = (owned.get(group, set()) | wanted.get(group, set())) & existing_names(qs, group)
+        for name in sorted(names):
+            out.append({"kind": kind, "name": name,
+                        "attrs": {"url": str(qs.value(f"{group}/{name}/url") or "")}})
+    return out
+
+
 def apply(conns, log=None):
     """Replace this plugin's connections with conns. Returns (added, removed, skipped names).
 
     A connection whose name is already taken by one the plugin did not write is
-    left alone (skipped).
+    left alone (skipped), unless the name follows the old scripts' pattern: that
+    one is taken over, as it is an older copy of the same connection.
     """
     qs = QSettings()
     owned = load_owned()
@@ -274,8 +293,10 @@ def apply(conns, log=None):
         mine = new_owned.setdefault(group, set())
         for c in group_conns:
             if c["name"] in taken:
-                skipped.append(c["name"])
-                continue
+                if not LEGACY_RE.match(c["name"]):
+                    skipped.append(c["name"])
+                    continue
+                qs.remove(f"{group}/{c['name']}")
             write_connection(qs, group, c)
             mine.add(c["name"])
     qs.sync()
