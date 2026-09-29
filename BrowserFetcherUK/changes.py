@@ -63,6 +63,21 @@ def _row(change, ds, services, details, old=None, new=None):
             "key": f"{change}|{ds['region']}|{ds['publisher']}|{_norm(ds['title'])}"}
 
 
+def _settings_changed(before, ds):
+    """Services whose connection has the same URL but other settings (style sheet, zoom levels...):
+    every non-empty value the new connection sets must match what is there now."""
+    old = {(c["kind"], c["name"]): c["attrs"] for c in before["conns"]}
+    changed = []
+    for c in ds["conns"]:
+        now = old.get((c["kind"], c["name"]))
+        service = c["name"].partition(" ")[0]
+        if now is None or now.get("url", "") != c["attrs"].get("url", ""):
+            continue  # new or re-linked: reported as such
+        if any(v and k != "url" and str(now.get(k, "")) != str(v) for k, v in c["attrs"].items()):
+            changed.append(service)
+    return _order(dict.fromkeys(changed))
+
+
 def _links(ds):
     return "\n".join(f"{s}: {ds['services'][s]}" for s in _order(ds["services"]))
 
@@ -85,6 +100,7 @@ def diff(old_conns, new_conns, regions=None):
         parts += [f"-{s}" for s in _order(before["services"]) if s not in ds["services"]]
         parts += [f"{s} link changed" for s in _order(ds["services"])
                   if s in before["services"] and before["services"][s] != ds["services"][s]]
+        parts += [f"{s} settings changed" for s in _settings_changed(before, ds)]
         # Same dataset under other names (old script: extra spaces, "/"; or a duplicate).
         new_names = {(c["kind"], c["name"]) for c in ds["conns"]}
         extra = sorted(c["name"] for c in before["conns"] if (c["kind"], c["name"]) not in new_names)

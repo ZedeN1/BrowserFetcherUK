@@ -287,7 +287,8 @@ def read_all():
 
 def read_browser(conns):
     """What the QGIS Browser holds now, for the change list: the plugin's own connections,
-    anything with the names of conns, and old-script ones (tagged source OLD_SCRIPT). URL only.
+    anything with the names of conns, and old-script ones (tagged source OLD_SCRIPT), with all
+    their settings (style, zoom levels, ...), not just the URL.
     The Browser may have been changed outside the plugin, so this is read every time."""
     qs = QSettings()
     owned = load_owned()
@@ -302,7 +303,7 @@ def read_browser(conns):
             legacy = name not in mine and bool(LEGACY_RE.match(name))
             if name in mine or name in wanted.get(group, ()) or legacy:
                 out.append({"kind": kind, "name": name, "source": OLD_SCRIPT if legacy else "",
-                            "attrs": {"url": str(qs.value(f"{group}/{name}/url") or "")}})
+                            "attrs": read_connection(qs, group, name)})
     return out
 
 

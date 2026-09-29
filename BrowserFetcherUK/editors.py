@@ -13,16 +13,36 @@ from . import connections, sources
 TITLE = "Browser Fetcher UK"
 
 
+def _settings(attrs, short=True):
+    """Every non-empty setting except the URL, e.g. 'styleUrl=…/OS_VTS_3857_Open_Greyscale.json ·
+    zmin=6 · zmax=15'. Passwords are masked; short=True cuts URLs to their last part."""
+    parts = []
+    for key, value in attrs.items():
+        if key == "url" or not value:
+            continue
+        if key == "password":
+            value = "••••"
+        elif short and "://" in str(value):
+            value = "…/" + str(value).rstrip("/").rsplit("/", 1)[-1]
+        parts.append(f"{key}={value}")
+    return parts
+
+
+def _tooltip(c):
+    lines = [c["name"], f"url={c['attrs'].get('url', '')}"] + _settings(c["attrs"], short=False)
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------- custom connections
 class CustomConnectionsDialog(QDialog):
     """Built-in and the user's own connections, each ticked or not; added on every Browser update."""
 
-    COLS = ["Use", "Source", "Type", "Name", "URL"]
+    COLS = ["Use", "Source", "Type", "Name", "URL", "Settings"]
 
     def __init__(self, evy, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Custom connections")
-        self.resize(900, 560)
+        self.resize(1150, 580)
         self.evy = evy
         self.data = connections.load_custom()
         self.data["connections"] = [copy.deepcopy(c) for c in self.data["connections"]]
@@ -89,10 +109,12 @@ class CustomConnectionsDialog(QDialog):
         for c, ref, ticked in rows:
             source = c.get("source", connections.CUSTOM) if ref[0] == "builtin" else connections.CUSTOM
             item = QTreeWidgetItem(["", source, connections.KIND_LABELS.get(c["kind"], c["kind"]),
-                                    c["name"], c["attrs"].get("url", "")])
+                                    c["name"], c["attrs"].get("url", ""), " · ".join(_settings(c["attrs"]))])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
             item.setData(0, Qt.ItemDataRole.UserRole, ref)
+            for col in range(1, len(self.COLS)):
+                item.setToolTip(col, _tooltip(c))
             if ref[0] == "builtin":
                 for col in range(1, len(self.COLS)):
                     item.setForeground(col, grey)
@@ -102,7 +124,8 @@ class CustomConnectionsDialog(QDialog):
         self.tree.blockSignals(False)
         for col in range(len(self.COLS) - 1):
             self.tree.resizeColumnToContents(col)
-        self.tree.setColumnWidth(3, min(self.tree.columnWidth(3), 380))
+        self.tree.setColumnWidth(3, min(self.tree.columnWidth(3), 320))
+        self.tree.setColumnWidth(4, min(self.tree.columnWidth(4), 320))
         self._update_count()
 
     def _sync(self):
@@ -211,21 +234,24 @@ class _PickDialog(QDialog):
     def __init__(self, conns, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add connections from the Browser")
-        self.resize(760, 480)
+        self.resize(1000, 520)
         self.conns = conns
         layout = QVBoxLayout(self)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Type", "Name", "URL"])
+        self.tree.setHeaderLabels(["Type", "Name", "URL", "Settings"])
         self.tree.setRootIsDecorated(False)
         for i, c in enumerate(conns):
             item = QTreeWidgetItem([connections.KIND_LABELS.get(c["kind"], c["kind"]), c["name"],
-                                    c["attrs"].get("url", "")])
+                                    c["attrs"].get("url", ""), " · ".join(_settings(c["attrs"]))])
+            for col in range(4):
+                item.setToolTip(col, _tooltip(c))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
             item.setData(0, Qt.ItemDataRole.UserRole, i)
             self.tree.addTopLevelItem(item)
-        for col in (0, 1):
+        for col in (0, 1, 2):
             self.tree.resizeColumnToContents(col)
+        self.tree.setColumnWidth(2, min(self.tree.columnWidth(2), 320))
         layout.addWidget(self.tree, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
