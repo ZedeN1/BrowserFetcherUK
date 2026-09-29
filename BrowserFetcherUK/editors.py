@@ -242,8 +242,7 @@ class _PickDialog(QDialog):
 
 
 def read_browser_connections():
-    """Connections in the QGIS settings that this plugin did not add, as connection dicts."""
-    reverse = {v: k for k, v in connections.KEY_REPLACEMENTS.items()}
+    """Connections in the QGIS settings that this plugin did not add (nor the old scripts)."""
     qs = QSettings()
     owned = connections.load_owned()
     out = []
@@ -251,16 +250,7 @@ def read_browser_connections():
         for name in sorted(connections.existing_names(qs, group)):
             if name in owned.get(group, ()) or connections.LEGACY_RE.match(name):
                 continue
-            qs.beginGroup(f"{group}/{name}")
-            attrs = {}
-            for key in qs.childKeys():
-                value = qs.value(key)
-                if key == "http-header" and isinstance(value, dict):
-                    for h, v in value.items():
-                        attrs[connections.HEADER_PREFIX + h] = str(v)
-                elif isinstance(value, (str, int, float, bool)):
-                    attrs[reverse.get(key, key)] = str(value).lower() if isinstance(value, bool) else str(value)
-            qs.endGroup()
+            attrs = connections.read_connection(qs, group, name)
             if attrs.get("url"):
                 out.append({"kind": kind, "name": name, "attrs": attrs})
     return out

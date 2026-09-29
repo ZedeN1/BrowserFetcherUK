@@ -24,6 +24,8 @@ from qgis.core import QgsApplication, QgsSettings
 
 PROFILE_DIR = os.path.normpath(os.path.join(QgsApplication.qgisSettingsDirPath(), "BrowserFetcherUK"))
 APPLIED_PATH = os.path.join(PROFILE_DIR, "applied.json")
+# Ticks the user changed in the Changes list: row key -> ticked (kept until changed back).
+CHOICES_PATH = os.path.join(PROFILE_DIR, "choices.json")
 
 SHARED_DEFAULT = (r"O:\0000_ElectronicLibrary\Computing\Software\GIS\QGIS\plugins\Browser_Fetcher_UK_cache"
                   if os.name == "nt" else
@@ -68,14 +70,6 @@ def save_settings(evy, shared, local):
     s.setValue(SETTINGS + "evy_mode", bool(evy))
     s.setValue(SETTINGS + "shared_folder", "" if os.path.normpath(shared) == SHARED_DEFAULT else shared)
     s.setValue(SETTINGS + "local_folder", "" if os.path.normpath(local) == LOCAL_DEFAULT else local)
-
-
-def legacy_checked():
-    return QgsSettings().value(SETTINGS + "legacy_checked", False, type=bool)
-
-
-def set_legacy_checked():
-    QgsSettings().setValue(SETTINGS + "legacy_checked", True)
 
 
 # ---------------------------------------------------------------- utilities

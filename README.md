@@ -20,10 +20,17 @@ Open it from the toolbar or **Web > Browser Fetcher UK**.
 
 1. **Fast fetch** (under a minute) or **Slow fetch** (an hour or more) saves a new copy of the
    connection list. Fetching never changes your QGIS Browser.
-2. The **Changes** list shows what applying the copy would change: new, removed, updated and retired
-   datasets, with the source of each.
-3. **Apply to QGIS Browser** writes the copy to the Browser. No downloading: it reads the copy in the
-   shared or local folder. Only connections the plugin added are replaced; yours are never touched.
+2. The **Changes** list compares the copy with what is really in your Browser: new, updated,
+   renamed, retired and removed datasets, with the source of each. Connections left by the old
+   `AddConnectionsToQGIS.py` script are included (untidy old names show as Renamed, datasets no longer
+   in the catalogues as Removed).
+3. Tick the changes you want (tick box in the header corner, or Select None / New / Updated / Removed /
+   Default) and click **Apply to QGIS Browser**. No downloading: it reads the copy in the shared or
+   local folder. Your ticks are remembered: an unticked change stays unticked (shown in grey italics)
+   until you tick it again. Default ticks everything except old-script-style connections whose URLs
+   come from no catalogue the plugin knows, as those are probably your own.
+4. Every Apply first saves a backup of all your Browser connections; **Settings > Restore backup**
+   puts them back (last 10 kept). Connections with other names are never touched.
 
 | Fetch | England from | Notes |
 |---|---|---|
@@ -32,7 +39,6 @@ Open it from the toolbar or **Web > Browser Fetcher UK**.
 
 - Fast fetch reuses a copy younger than 24 hours instead of fetching again, and suggests a slow fetch
   once the last one is more than 30 days old (both adjustable in Settings; 0 switches them off).
-- The first Apply offers to remove connections left by the old `AddConnectionsToQGIS.py` script.
 - Earlier fetches and applies are kept in the history and can be saved as CSV.
 
 ### Shared folder (teams)
@@ -63,7 +69,7 @@ the EVY VPN.
 | Where | What |
 |---|---|
 | Data folder (shared or local) | `snapshot.json` (current list), `history/` (earlier lists and change CSVs), `work/` (unfinished fetch), `update.lock`, `update.log` |
-| QGIS profile `BrowserFetcherUK/` | `applied.json` (what your Browser has), `owned.json` (connections the plugin added), `custom_connections.json`, `sources.json` |
+| QGIS profile `BrowserFetcherUK/` | `applied.json` (last Apply), `owned.json` (connections the plugin added), `choices.json` (your ticks), `backups/` (last 10), `custom_connections.json`, `sources.json` |
 
 ## Issues
 

@@ -2,12 +2,13 @@ import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QRect, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                  QGroupBox, QLabel, QPushButton, QCheckBox, QComboBox, QLineEdit,
                                  QSpinBox, QTreeWidget, QTreeWidgetItem, QHeaderView, QProgressBar,
-                                 QTextBrowser, QMessageBox, QFileDialog, QWidget)
+                                 QTextBrowser, QMessageBox, QFileDialog, QWidget, QInputDialog,
+                                 QStyle, QStyleOptionButton, QToolButton, QMenu)
 from qgis.core import QgsApplication
 from qgis.gui import QgsCollapsibleGroupBox, QgsFileWidget
 
@@ -25,6 +26,61 @@ CHANGE_COLOURS = {"New": "#2e7d32", "Removed": "#c62828", "Updated": "#b36b00",
 WARN = "#b36b00"
 # Changes list choices besides the history files.
 PENDING, LAST_APPLIED = "pending", "applied"
+# Changes table: a tick column, then the change columns.
+COL_CHECK = 0
+TABLE_COLUMNS = [""] + changes.COLUMNS
+UPDATES = {"Updated", "Renamed", "Retired", "Reinstated"}
+
+_CHECK_STYLE = {Qt.CheckState.Checked: QStyle.StateFlag.State_On,
+                Qt.CheckState.Unchecked: QStyle.StateFlag.State_Off,
+                Qt.CheckState.PartiallyChecked: QStyle.StateFlag.State_NoChange}
+
+
+class _CheckHeader(QHeaderView):
+    """Horizontal header whose first section is a select-all tick box (as in LiDAR Fetcher UK).
+
+    Clicking that section emits toggled instead of sorting; set_state shows whether none,
+    some or all rows are ticked.
+    """
+
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.state = Qt.CheckState.Unchecked
+        self.show_box = True
+        self.setSectionsClickable(True)
+
+    def set_state(self, state):
+        self.state = state
+        self.viewport().update()
+
+    def paintSection(self, painter, rect, index):
+        painter.save()
+        super().paintSection(painter, rect, index)
+        painter.restore()
+        if index != COL_CHECK or not self.show_box:
+            return
+        size = self.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth)
+        opt = QStyleOptionButton()
+        opt.rect = QRect(rect.x() + (rect.width() - size) // 2,
+                         rect.y() + (rect.height() - size) // 2, size, size)
+        opt.state = QStyle.StateFlag.State_Enabled | _CHECK_STYLE[self.state]
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_IndicatorCheckBox, opt, painter)
+
+    def _on_check(self, event):
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        return self.show_box and self.logicalIndexAt(pos) == COL_CHECK
+
+    def mousePressEvent(self, event):
+        if self._on_check(event):
+            self.toggled.emit(self.state != Qt.CheckState.Checked)
+        else:
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if not self._on_check(event):
+            super().mouseReleaseEvent(event)
 
 
 class BrowserFetcherDialog(QDialog):
@@ -38,7 +94,9 @@ class BrowserFetcherDialog(QDialog):
         self.rows = []            # rows shown in the Changes table
         self.pending = []         # what Apply would change
         self.bars = {}            # source key -> (label, progress bar) while fetching
-        self.legacy_found = []    # old-script connections Apply would not replace
+        self.choices = store.read_json(store.CHOICES_PATH) or {}  # row key -> ticked, as changed by the user
+        self.defaults = {}        # row key -> ticked by default
+        self.target = []          # connections the latest copy would give
         self.setWindowTitle(TITLE)
         self.resize(900, 800)
 
@@ -125,38 +183,56 @@ class BrowserFetcherDialog(QDialog):
         top.addWidget(self.filter_edit, 1)
         cl.addLayout(top)
         self.table = QTreeWidget()
-        self.table.setHeaderLabels(changes.COLUMNS)
+        header = _CheckHeader(self.table)
+        self.table.setHeader(header)
+        self.table.setHeaderLabels(TABLE_COLUMNS)
         self.table.setRootIsDecorated(False)
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
-        header = self.table.header()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(COL_CHECK, QHeaderView.ResizeMode.Fixed)
+        header.setMinimumSectionSize(24)
+        header.resizeSection(COL_CHECK, 28)
         header.setStretchLastSection(True)
+        header.toggled.connect(self._tick_visible)
+        self.table.headerItem().setToolTip(COL_CHECK, "Tick or untick all listed changes")
+        self.table.itemChanged.connect(self._tick_changed)
         self.table.setMinimumHeight(200)
         cl.addWidget(self.table, 1)
-        legacy_row = QHBoxLayout()
-        self.legacy_label = QLabel()
-        self.legacy_label.setWordWrap(True)
-        self.legacy_label.setStyleSheet(f"color: {WARN};")
-        legacy_row.addWidget(self.legacy_label, 1)
-        self.legacy_btn = QPushButton("Remove them...")
-        self.legacy_btn.clicked.connect(self.remove_legacy)
-        legacy_row.addWidget(self.legacy_btn)
-        self.legacy_widget = QWidget()
-        self.legacy_widget.setLayout(legacy_row)
-        legacy_row.setContentsMargins(0, 0, 0, 0)
-        self.legacy_widget.hide()
-        cl.addWidget(self.legacy_widget)
         bottom = QHBoxLayout()
         self.counts_label = QLabel()
         bottom.addWidget(self.counts_label, 1)
+        # Everything starts ticked as Default would, so most people never need this.
+        self.select_btn = QToolButton()
+        self.select_btn.setText("Select")
+        self.select_btn.setToolTip("Tick or untick groups of the listed changes")
+        self.select_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self.select_btn)
+        for text, slot, tip in (
+                ("Default", self._select_default,
+                 "Everything except connections that look like your own (old-script style names "
+                 "whose URLs come from no catalogue the plugin knows); forgets your ticks"),
+                ("None", lambda: self._select(lambda r: False), "Untick every listed change"),
+                ("Also new", lambda: self._select(lambda r: r["Change"] == "New", add=True),
+                 "Also tick every new dataset"),
+                ("Also updated", lambda: self._select(lambda r: r["Change"] in UPDATES, add=True),
+                 "Also tick every updated, renamed, retired or reinstated dataset"),
+                ("Also removed", lambda: self._select(lambda r: r["Change"] == "Removed", add=True),
+                 "Also tick every removed dataset")):
+            action = menu.addAction(text)
+            action.setToolTip(tip)
+            action.triggered.connect(slot)
+        menu.setToolTipsVisible(True)
+        self.select_btn.setMenu(menu)
+        bottom.addWidget(self.select_btn)
         self.save_csv_btn = QPushButton("Save CSV...")
         self.save_csv_btn.clicked.connect(self.save_csv)
         bottom.addWidget(self.save_csv_btn)
         self.apply_btn = QPushButton("Apply to QGIS Browser")
-        self.apply_btn.setToolTip("Replace the connections this plugin added with the latest copy of the "
-                                  "list.\nNo downloading: reads the copy in the shared or local folder. "
-                                  "Connections you added yourself are never touched.")
+        self.apply_btn.setToolTip("Make the ticked changes in the QGIS Browser. No downloading: reads the "
+                                  "copy in the shared or local folder.\nA backup of all your connections "
+                                  "is saved first (Settings > Restore backup). Connections you added\n"
+                                  "yourself are never touched unless they are ticked in the list.")
         self.apply_btn.clicked.connect(self.apply)
         font = self.apply_btn.font()
         font.setBold(True)
@@ -205,6 +281,8 @@ class BrowserFetcherDialog(QDialog):
                 ("Catalogue sources...", self.edit_sources,
                  "Which catalogues are searched: URLs, naming, import / export"),
                 ("Reset folders", self._reset_folders, "Back to the default folders"),
+                ("Restore backup...", self.restore_backup,
+                 "Put the Browser connections back as they were before an Apply or removal"),
                 ("Remove old script connections...", self.remove_legacy,
                  "Remove connections added by the old AddConnectionsToQGIS.py script\n"
                  "(names like 'WMS UK EA: ...' that this plugin did not add)"),
@@ -426,7 +504,7 @@ class BrowserFetcherDialog(QDialog):
         self.full_btn.setEnabled(not busy and st is not None and not locked)
         self.copy_btn.setVisible(bool(st and st.can_copy_to_shared) and not busy)
         self.copy_btn.setEnabled(not locked)
-        self.apply_btn.setEnabled(not busy and bool(st and st.snapshot) and bool(self.pending))
+        self.apply_btn.setEnabled(not busy and bool(st and st.snapshot) and bool(self._ticked_rows()))
         self.cancel_btn.setEnabled(busy)
 
     # ------------------------------------------------------------------- changes
@@ -438,27 +516,27 @@ class BrowserFetcherDialog(QDialog):
                   for c in (store.read_applied() or {}).get("connections", [])}
         current = connections.read_browser(conns)
         for c in current:
-            c["source"] = labels.get((c["kind"], c["name"]), "")
+            c["source"] = c["source"] or labels.get((c["kind"], c["name"]), "")
         return current
 
     def _pending_rows(self):
+        """What Apply would change: the latest copy compared with the real Browser. Also sets
+        each row's default tick (off for rows that look like the user's own connections)."""
         st = self.status
+        self.defaults = {}
         if not st or not st.snapshot:
-            self._show_legacy(set())
             return []
         new = connections.build(st.snapshot, self.evy_cb.isChecked())
-        self._show_legacy({(connections.KINDS[c["kind"]][0], c["name"]) for c in new})
-        return changes.diff(self._browser_now(new), new)
+        self.target = new
+        rows = changes.diff(self._browser_now(new), new)
+        hosts = connections.known_hosts(new)
+        for r in rows:
+            r["own"] = connections.looks_own(r, hosts)
+            self.defaults[r["key"]] = not r["own"]
+        return rows
 
-    def _show_legacy(self, targets):
-        """Note old-script connections that Apply will not replace (no longer in the list)."""
-        leftover = [x for x in connections.find_legacy() if x not in targets]
-        self.legacy_found = leftover
-        if leftover:
-            self.legacy_label.setText(
-                f"{len(leftover):,} connections in your Browser look like old-script ones (e.g. "
-                f"\"{leftover[0][1]}\") and are not in the current list, so Apply leaves them alone.")
-        self.legacy_widget.setVisible(bool(leftover))
+    def _ticked(self, row):
+        return self.choices.get(row["key"], self.defaults.get(row["key"], True))
 
     def _fill_view_combo(self, select=None):
         self.pending = self._pending_rows()
@@ -497,24 +575,120 @@ class BrowserFetcherDialog(QDialog):
         else:
             rows = []
         self.rows = rows
+        pending = choice == PENDING
+        self.table.blockSignals(True)
         self.table.setSortingEnabled(False)
         self.table.clear()
         items = []
-        for r in rows:
-            item = QTreeWidgetItem([r.get(c, "") for c in changes.COLUMNS])
+        for i, r in enumerate(rows):
+            item = QTreeWidgetItem([""] + [r.get(c, "") for c in changes.COLUMNS])
+            item.setData(COL_CHECK, Qt.ItemDataRole.UserRole, i)
             colour = CHANGE_COLOURS.get(r.get("Change"))
             if colour:
-                item.setForeground(0, QBrush(QColor(colour)))
-            if r.get("details"):
-                for col in range(len(changes.COLUMNS)):
-                    item.setToolTip(col, r["details"])
+                item.setForeground(1, QBrush(QColor(colour)))
+            if pending:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(COL_CHECK, Qt.CheckState.Checked if self._ticked(r)
+                                   else Qt.CheckState.Unchecked)
+            self._style_item(item, r)
             items.append(item)
         self.table.addTopLevelItems(items)
         self.table.setSortingEnabled(True)
-        for col in range(len(changes.COLUMNS) - 1):
+        self.table.blockSignals(False)
+        self.table.setColumnHidden(COL_CHECK, not pending)
+        self.table.header().show_box = pending
+        self.select_btn.setVisible(pending)
+        for col in range(1, len(TABLE_COLUMNS) - 1):
             self.table.resizeColumnToContents(col)
-        self.table.setColumnWidth(3, min(self.table.columnWidth(3), 420))
+        self.table.setColumnWidth(4, min(self.table.columnWidth(4), 420))
         self._filter_rows()
+
+    def _style_item(self, item, row):
+        """Remembered unticks (ignored) in grey italics; rows that look like the user's own
+        connections explained in the tooltip."""
+        pending = self.view_combo.currentData() == PENDING
+        ignored = pending and self.choices.get(row["key"]) is False
+        tip = row.get("details", "")
+        if pending and ignored:
+            tip = ("Ignored: you unticked this change, so it stays unticked on later runs until "
+                   "you tick it again.\n\n" + tip)
+        elif pending and row.get("own"):
+            tip = ("Looks like your own connection (an old-script style name, but its URL is from no "
+                   "catalogue the plugin knows), so it is not ticked by default.\n\n" + tip)
+        grey = QBrush(self.palette().color(self.palette().ColorRole.PlaceholderText))
+        for col in range(len(TABLE_COLUMNS)):
+            font = item.font(col)
+            font.setItalic(ignored)
+            item.setFont(col, font)
+            if col > 1:
+                item.setForeground(col, grey if ignored else QBrush())
+            item.setToolTip(col, tip.strip())
+
+    # ------------------------------------------------------------------- ticks
+    def _items(self, visible=True):
+        items = [self.table.topLevelItem(i) for i in range(self.table.topLevelItemCount())]
+        return [i for i in items if not (visible and i.isHidden())]
+
+    def _row_of(self, item):
+        return self.rows[item.data(COL_CHECK, Qt.ItemDataRole.UserRole)]
+
+    def _set_tick(self, item, ticked):
+        """Tick or untick one row and remember it when it differs from the default."""
+        row = self._row_of(item)
+        item.setCheckState(COL_CHECK, Qt.CheckState.Checked if ticked else Qt.CheckState.Unchecked)
+        if ticked == self.defaults.get(row["key"], True):
+            self.choices.pop(row["key"], None)
+        else:
+            self.choices[row["key"]] = ticked
+        self._style_item(item, row)
+
+    def _save_choices(self):
+        try:
+            store.write_json(store.CHOICES_PATH, self.choices)
+        except OSError as e:
+            self.log(f"Could not save your ticks: {e}")
+        self._filter_rows()
+        self._update_buttons()
+
+    def _tick_changed(self, item, column):
+        if column != COL_CHECK or self.view_combo.currentData() != PENDING:
+            return
+        self.table.blockSignals(True)
+        self._set_tick(item, item.checkState(COL_CHECK) == Qt.CheckState.Checked)
+        self.table.blockSignals(False)
+        self._save_choices()
+
+    def _tick_visible(self, ticked):
+        self._select(lambda r: ticked)
+
+    def _select(self, rule, add=False):
+        """Tick the listed rows that match rule (add: leave the others as they are)."""
+        if self.view_combo.currentData() != PENDING:
+            return
+        self.table.blockSignals(True)
+        for item in self._items():
+            wanted = rule(self._row_of(item))
+            if wanted or not add:
+                self._set_tick(item, wanted)
+        self.table.blockSignals(False)
+        self._save_choices()
+
+    def _select_default(self):
+        if self.view_combo.currentData() != PENDING:
+            return
+        self.table.blockSignals(True)
+        for item in self._items():
+            row = self._row_of(item)
+            self.choices.pop(row["key"], None)
+            self._set_tick(item, self.defaults.get(row["key"], True))
+        self.table.blockSignals(False)
+        self._save_choices()
+
+    def _ticked_rows(self):
+        if self.view_combo.currentData() != PENDING:
+            return [r for r in self.pending if self._ticked(r)]
+        return [self._row_of(i) for i in self._items(visible=False)
+                if i.checkState(COL_CHECK) == Qt.CheckState.Checked]
 
     def _filter_rows(self, *args):
         text = self.filter_edit.text().casefold()
@@ -522,18 +696,28 @@ class BrowserFetcherDialog(QDialog):
         for i in range(self.table.topLevelItemCount()):
             item = self.table.topLevelItem(i)
             hide = bool(text) and not any(text in item.text(c).casefold()
-                                          for c in range(len(changes.COLUMNS)))
+                                          for c in range(1, len(TABLE_COLUMNS)))
             item.setHidden(hide)
             shown += not hide
         summary = changes.summary(self.rows)
-        if self.view_combo.currentData() == PENDING and self.status:
+        pending = self.view_combo.currentData() == PENDING
+        if pending and self.status:
             if not self.status.snapshot:
                 summary = "No copy of the connection list yet: use Fast fetch"
+            elif not self.rows:
+                summary = "Up to date: nothing to apply"
             else:
-                summary = "Up to date: nothing to apply" if not self.rows else "Apply would change: " + summary
+                ticked = len(self._ticked_rows())
+                ignored = sum(self.choices.get(r["key"]) is False for r in self.rows)
+                summary = f"{summary}; {ticked:,} ticked" + (f", {ignored:,} ignored" if ignored else "")
         if text:
             summary += f" ({shown} shown)"
         self.counts_label.setText(summary)
+        visible = self._items() if pending else []
+        ticks = sum(i.checkState(COL_CHECK) == Qt.CheckState.Checked for i in visible)
+        state = (Qt.CheckState.Checked if visible and ticks == len(visible)
+                 else Qt.CheckState.PartiallyChecked if ticks else Qt.CheckState.Unchecked)
+        self.table.header().set_state(state)
 
     def save_csv(self):
         if not self.rows:
@@ -550,15 +734,23 @@ class BrowserFetcherDialog(QDialog):
         st = self.status
         if not st or not st.snapshot:
             return
-        self._offer_legacy_cleanup()
+        rows = self._ticked_rows()
+        if not rows:
+            return
         evy = self.evy_cb.isChecked()
         snapshot = st.snapshot
-        conns = connections.build(snapshot, evy)
-        rows = changes.diff(self._browser_now(conns), conns)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            added, removed, skipped = connections.apply(conns, self.log)
+            folder = connections.backup(f"before applying {changes.summary(rows)}")
+            written, removed, skipped = connections.apply_rows(rows, self.log)
             self.iface.reloadConnections()
+            # Record what the Browser now holds of the plugin's, with source labels.
+            owned = connections.load_owned()
+            is_owned = lambda c: c["name"] in owned.get(connections.KINDS[c["kind"]][0], ())
+            before = (store.read_applied() or {}).get("connections", [])
+            kept = {(c["kind"], c["name"]) for c in self.target}
+            conns = [c for c in self.target if is_owned(c)]
+            conns += [c for c in before if is_owned(c) and (c["kind"], c["name"]) not in kept]
             store.write_applied(snapshot, st.origin, evy, conns)
             applied = store.read_applied()
             applied["changes"] = [{k: r[k] for k in changes.COLUMNS} for r in rows]
@@ -570,7 +762,10 @@ class BrowserFetcherDialog(QDialog):
             raise
         finally:
             QApplication.restoreOverrideCursor()
-        self.log(f"<b>Applied to the QGIS Browser</b>: {added:,} connections ({changes.summary(rows)}).")
+        left = len(self.pending) - len(rows)
+        self.log(f"<b>Applied to the QGIS Browser</b>: {changes.summary(rows)} ({written:,} connections "
+                 f"written, {removed:,} removed)" + (f"; {left:,} unticked changes left as they are" if left else "")
+                 + f". Backup: {folder}")
         self._show_status()
         self._fill_view_combo(select=LAST_APPLIED)
 
@@ -584,14 +779,6 @@ class BrowserFetcherDialog(QDialog):
             except OSError as e:
                 self.log(f"Could not keep a local copy in {local}: {e}")
 
-    def _offer_legacy_cleanup(self):
-        if store.legacy_checked():
-            return
-        found = connections.find_legacy()
-        store.set_legacy_checked()
-        if found:
-            self._ask_remove_legacy(found)
-
     def _ask_remove_legacy(self, found):
         examples = "\n".join(f"  {name}" for _, name in found[:5])
         reply = QMessageBox.question(
@@ -601,14 +788,13 @@ class BrowserFetcherDialog(QDialog):
             f"Remove them? The plugin adds its own up-to-date versions. Connections with "
             f"other names are not touched.")
         if reply == QMessageBox.StandardButton.Yes:
+            connections.backup("before removing old script connections")
             count = connections.remove_legacy(found)
             self.iface.reloadConnections()
             self.log(f"Removed {count:,} connections added by the old script.")
 
     def remove_legacy(self):
-        # From the note under the table: only the leftovers; from Settings: every old-script one.
-        found = (self.legacy_found if self.sender() is self.legacy_btn else None) or connections.find_legacy()
-        store.set_legacy_checked()
+        found = connections.find_legacy()
         if not found:
             QMessageBox.information(self, TITLE, "No connections from the old script found.")
             return
@@ -620,6 +806,7 @@ class BrowserFetcherDialog(QDialog):
                                                   "to the QGIS Browser?")
         if reply != QMessageBox.StandardButton.Yes:
             return
+        connections.backup("before removing plugin connections")
         count = connections.remove_owned()
         self.iface.reloadConnections()
         applied = store.read_applied()
@@ -630,6 +817,37 @@ class BrowserFetcherDialog(QDialog):
         if self.status:
             self._show_status()
         self._fill_view_combo()
+
+    def restore_backup(self):
+        backups = connections.list_backups()
+        if not backups:
+            QMessageBox.information(self, TITLE, "No backups yet: one is saved before every Apply.")
+            return
+        labels = [f"{store.describe(b['made'])}: {b.get('reason', '')} ({b.get('connections', 0):,} connections)"
+                  for b in backups]
+        label, ok = QInputDialog.getItem(self, TITLE, "Put the Browser connections back as they were:",
+                                         labels, 0, False)
+        if not ok:
+            return
+        chosen = backups[labels.index(label)]
+        reply = QMessageBox.question(
+            self, TITLE,
+            f"Replace every WMS, WFS, WCS, XYZ, vector tile and ArcGIS connection in the Browser with "
+            f"the {chosen.get('connections', 0):,} in the backup of {store.describe(chosen['made'])}?\n\n"
+            f"Connections added since then are removed too. Your current connections are backed up "
+            f"first, so this can be undone the same way.")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            connections.backup(f"before restoring the backup of {store.describe(chosen['made'])}")
+            count = connections.restore(chosen["folder"])
+            self.iface.reloadConnections()
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.log(f"Restored {count:,} connections from the backup of {store.describe(chosen['made'])}.")
+        self._show_status()
+        self._fill_view_combo(select=PENDING)
 
     def export_xml(self):
         st = self.status

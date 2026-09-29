@@ -16,7 +16,9 @@ connection XML exports).
 import json
 import os
 import re
+import shutil
 import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
 from xml.sax.saxutils import quoteattr
 
 from qgis.PyQt.QtCore import QSettings
@@ -250,10 +252,43 @@ def write_connection(qs, group, conn):
         qs.setValue(f"{path}/http-header", headers)
 
 
+OLD_SCRIPT = "Old script"
+
+
+def read_connection(qs, group, name):
+    """One connection from the settings, with every value (for backups and imports)."""
+    reverse = {v: k for k, v in KEY_REPLACEMENTS.items()}
+    qs.beginGroup(f"{group}/{name}")
+    try:
+        attrs = {}
+        for key in qs.childKeys():
+            value = qs.value(key)
+            if key == "http-header" and isinstance(value, dict):
+                for h, v in value.items():
+                    attrs[HEADER_PREFIX + h] = str(v)
+            elif isinstance(value, bool):
+                attrs[reverse.get(key, key)] = str(value).lower()
+            elif isinstance(value, (str, int, float)):
+                attrs[reverse.get(key, key)] = str(value)
+        return attrs
+    finally:
+        qs.endGroup()
+
+
+def read_all():
+    """Every Browser connection of the kinds this plugin handles, the user's own included."""
+    qs = QSettings()
+    out = []
+    for kind, (group, *_) in KINDS.items():
+        for name in sorted(existing_names(qs, group)):
+            out.append({"kind": kind, "name": name, "attrs": read_connection(qs, group, name)})
+    return out
+
+
 def read_browser(conns):
-    """What the QGIS Browser holds now for the plugin's own connections and for the names of
-    conns, as connection dicts (URL only): lets the change list compare with the real Browser,
-    which may have been changed outside the plugin."""
+    """What the QGIS Browser holds now, for the change list: the plugin's own connections,
+    anything with the names of conns, and old-script ones (tagged source OLD_SCRIPT). URL only.
+    The Browser may have been changed outside the plugin, so this is read every time."""
     qs = QSettings()
     owned = load_owned()
     wanted = {}
@@ -261,51 +296,66 @@ def read_browser(conns):
         wanted.setdefault(KINDS[c["kind"]][0], set()).add(c["name"])
     out = []
     for kind, (group, *_) in KINDS.items():
-        names = (owned.get(group, set()) | wanted.get(group, set())) & existing_names(qs, group)
-        for name in sorted(names):
-            out.append({"kind": kind, "name": name,
-                        "attrs": {"url": str(qs.value(f"{group}/{name}/url") or "")}})
+        existing = existing_names(qs, group)
+        mine = owned.get(group, set())
+        for name in sorted(existing):
+            legacy = name not in mine and bool(LEGACY_RE.match(name))
+            if name in mine or name in wanted.get(group, ()) or legacy:
+                out.append({"kind": kind, "name": name, "source": OLD_SCRIPT if legacy else "",
+                            "attrs": {"url": str(qs.value(f"{group}/{name}/url") or "")}})
     return out
 
 
-def apply(conns, log=None):
-    """Replace this plugin's connections with conns. Returns (added, removed, skipped names).
+def known_hosts(conns):
+    """Hosts of every URL the plugin knows (catalogue, built-in and custom connections)."""
+    return {urlparse(c["attrs"].get("url", "")).netloc.lower() for c in conns} - {""}
 
-    A connection whose name is already taken by one the plugin did not write is
-    left alone (skipped), unless the name follows the old scripts' pattern: that
-    one is taken over, as it is an older copy of the same connection.
+
+def looks_own(row, hosts):
+    """A Removed row of old-script-style connections whose URLs come from no host the plugin
+    knows: probably the user's own, not a stale catalogue dataset."""
+    old = row.get("old") or []
+    return (row["Change"] == "Removed" and bool(old)
+            and all(c.get("source") == OLD_SCRIPT for c in old)
+            and not any(urlparse(c["attrs"].get("url", "")).netloc.lower() in hosts for c in old))
+
+
+def apply_rows(rows, log=None):
+    """Make the changes of the given (ticked) rows: remove each row's old connections and
+    write its new ones. Returns (written, removed, skipped names).
+
+    A name taken by a connection the plugin did not write is left alone (skipped), unless it
+    follows the old scripts' pattern (an older copy of the same connection) or the row
+    replaces it anyway.
     """
     qs = QSettings()
     owned = load_owned()
-    removed = 0
-    for group, names in owned.items():
-        for name in names:
-            qs.remove(f"{group}/{name}")
-            removed += 1
-
-    new_owned = {}
+    written = removed = 0
     skipped = []
-    by_group = {}
-    for c in conns:
-        by_group.setdefault(KINDS[c["kind"]][0], []).append(c)
-    for group, group_conns in by_group.items():
-        taken = existing_names(qs, group)
-        mine = new_owned.setdefault(group, set())
-        for c in group_conns:
-            if c["name"] in taken:
-                if not LEGACY_RE.match(c["name"]):
-                    skipped.append(c["name"])
-                    continue
-                qs.remove(f"{group}/{c['name']}")
+    for row in rows:
+        replacing = {(c["kind"], c["name"]) for c in row.get("old", [])}
+        for c in row.get("old", []):
+            group = KINDS[c["kind"]][0]
+            qs.remove(f"{group}/{c['name']}")
+            owned.get(group, set()).discard(c["name"])
+            removed += 1
+        for c in row.get("new", []):
+            group = KINDS[c["kind"]][0]
+            name = c["name"]
+            if (name in existing_names(qs, group) and name not in owned.get(group, set())
+                    and (c["kind"], name) not in replacing and not LEGACY_RE.match(name)):
+                skipped.append(name)
+                continue
+            qs.remove(f"{group}/{name}")
             write_connection(qs, group, c)
-            mine.add(c["name"])
+            owned.setdefault(group, set()).add(name)
+            written += 1
     qs.sync()
-    save_owned(new_owned)
-    added = sum(len(v) for v in new_owned.values())
+    save_owned(owned)
     if log and skipped:
         log(f"{len(skipped)} connection(s) left as they were: a connection with the same name "
             f"already exists that this plugin did not add (e.g. {skipped[0]})")
-    return added, removed, skipped
+    return written, removed, skipped
 
 
 def remove_owned():
@@ -339,6 +389,62 @@ def remove_legacy(found):
         qs.remove(f"{group}/{name}")
     qs.sync()
     return len(found)
+
+
+# ------------------------------------------------------------------ backups
+BACKUP_DIR = os.path.join(store.PROFILE_DIR, "backups")
+KEEP_BACKUPS = 10
+
+
+def backup(reason):
+    """Save every Browser connection (QGIS XML, one file per kind) and the plugin's records
+    in backups/<YYYY-MM-DD_HHMMSS>/, keeping the last KEEP_BACKUPS. Returns the folder."""
+    from datetime import datetime
+    folder = os.path.join(BACKUP_DIR, f"{datetime.now():%Y-%m-%d_%H%M%S}")
+    conns = read_all()
+    export_xml(conns, folder, prefix="")
+    store.write_json(os.path.join(folder, "backup.json"),
+                     {"made": store.now(), "reason": reason, "connections": len(conns),
+                      "owned": {k: sorted(v) for k, v in load_owned().items()},
+                      "applied": store.read_applied()})
+    for old in list_backups()[KEEP_BACKUPS:]:
+        shutil.rmtree(old["folder"], ignore_errors=True)
+    return folder
+
+
+def list_backups():
+    """Backups, newest first: [{"folder", "made", "reason", "connections"}]."""
+    out = []
+    if os.path.isdir(BACKUP_DIR):
+        for name in sorted(os.listdir(BACKUP_DIR), reverse=True):
+            info = store.read_json(os.path.join(BACKUP_DIR, name, "backup.json"))
+            if info:
+                out.append(dict(info, folder=os.path.join(BACKUP_DIR, name)))
+    return out
+
+
+def restore(folder):
+    """Put the Browser back exactly as in a backup: every connection of these kinds is replaced
+    by the backup's, and the plugin's records with it. Returns the number restored."""
+    info = store.read_json(os.path.join(folder, "backup.json")) or {}
+    conns = []
+    for kind, (*_, filename) in KINDS.items():
+        path = os.path.join(folder, f"{filename}.xml")
+        if os.path.exists(path):
+            try:
+                conns += parse_xml_file(path)
+            except ValueError:
+                pass  # an empty file: no connections of this kind
+    qs = QSettings()
+    for group, *_ in KINDS.values():
+        qs.remove(group)
+    for c in conns:
+        write_connection(qs, KINDS[c["kind"]][0], c)
+    qs.sync()
+    save_owned({k: set(v) for k, v in info.get("owned", {}).items()})
+    if info.get("applied"):
+        store.write_json(store.APPLIED_PATH, info["applied"])
+    return len(conns)
 
 
 # ---------------------------------------------------------------------- XML
