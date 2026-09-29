@@ -16,6 +16,9 @@ from qgis.PyQt.QtCore import pyqtSignal
 from . import changes, connections, store
 from .sources import BASE_SLEEP, MAX_RETRIES, SLEEP_INCREMENT
 
+# Attempts at a catalogue's first request in a run (MAX_RETRIES once it has answered).
+FIRST_PAGE_RETRIES = 3
+
 _TAGS = re.compile(r"<[^>]+>")
 
 
@@ -68,6 +71,7 @@ class SourceTask(_Task):
         self.lock = lock
         self.complete = False
         self.lost_lock = False
+        self.answered = False  # the catalogue has answered at least once in this run
 
     def run(self):
         try:
@@ -82,7 +86,12 @@ class SourceTask(_Task):
                 return False
             # A source that fails is not fatal: the snapshot keeps its previous datasets.
             self.error = str(e)
-            self.warn(f"{self.source.LABEL}: failed ({e})")
+            if self.answered:
+                self.warn(f"{self.source.LABEL}: failed ({e}); pages fetched so far are kept and "
+                          f"the next fetch carries on from there")
+            else:
+                self.warn(f"{self.source.LABEL}: not answering at the moment ({e}); try again later. "
+                          f"Its datasets from the previous copy are kept")
             self.log_detail(traceback.format_exc())
             return True
 
@@ -121,6 +130,7 @@ class SourceTask(_Task):
             if raw is None:
                 return  # cancelled
             count, raw = raw
+            self.answered = True
             if total is None and count is not None:
                 total = work["total"] = count
                 self.log_detail(f"{src.LABEL}: {total} records in the catalogue")
@@ -145,17 +155,20 @@ class SourceTask(_Task):
             self.log(f"{src.LABEL}: done, {kept} datasets with map services")
 
     def fetch_page(self, offset):
+        # A catalogue that has not answered once in this run is probably down: give up soon
+        # rather than retry for half an hour. Once it answers, ride out occasional failures.
+        tries = MAX_RETRIES if self.answered else FIRST_PAGE_RETRIES
         wait = BASE_SLEEP
-        for attempt in range(1, MAX_RETRIES + 1):
+        for attempt in range(1, tries + 1):
             try:
                 return self.source.fetch_page(offset, self.feedback)
             except Exception as e:
                 if self.isCanceled():
                     return None
-                if attempt == MAX_RETRIES:
-                    raise RuntimeError(f"record {offset}: {e} (gave up after {MAX_RETRIES} attempts)")
+                if attempt == tries:
+                    raise RuntimeError(f"record {offset}: {e}; gave up after {tries} attempts")
                 self.warn(f"{self.source.LABEL}: record {offset}: {e} "
-                          f"(attempt {attempt}/{MAX_RETRIES}, retrying in {wait} s)")
+                          f"(attempt {attempt}/{tries}, retrying in {wait} s)")
                 self.sleep(wait)
                 if self.isCanceled():
                     return None

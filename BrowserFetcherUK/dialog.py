@@ -1014,12 +1014,17 @@ class BrowserFetcherDialog(QDialog):
 
     def _fetch_finished(self, task, ok):
         self.task = None
+        # Stop every bar still waiting for a record count (busy animation) or part-way.
+        outcome = {sub.source.KEY: ("done" if sub.complete else "failed" if sub.error else "cancelled")
+                   for sub in task.subtasks}
+        for key, bar in self.bars.items():
+            if bar.maximum() == 0:
+                bar.setRange(0, 1)
+                bar.setValue(1 if outcome.get(key) == "done" else 0)
+                bar.setFormat(outcome.get(key, "stopped"))
+            elif bar.value() < bar.maximum():
+                bar.setFormat(f"{bar.value():,} / {bar.maximum():,} {outcome.get(key, 'stopped')}")
         if ok:
-            for bar in self.bars.values():
-                if bar.maximum() == 0:
-                    bar.setRange(0, 1)
-                    bar.setValue(1)
-                    bar.setFormat("done")
             self.log(f"<b>New copy saved</b> ({changes.summary(task.rows)} since the previous copy). "
                      f"Check the Changes list, then <b>Apply to QGIS Browser</b>.")
         elif task.lost_lock:

@@ -4,6 +4,7 @@ Blocking: only call from a QgsTask, where cancel and timeout can interrupt a
 request (on the main thread QGIS runs it in a helper thread that ignores both).
 """
 import threading
+import time
 
 from qgis.core import QgsBlockingNetworkRequest, QgsFeedback
 from qgis.PyQt.QtCore import QUrl, QByteArray
@@ -41,6 +42,7 @@ def request(url, data=None, feedback=None, content_type="application/json", time
         timer.start()
 
     blocking = QgsBlockingNetworkRequest()
+    started = time.monotonic()
     try:
         if data is None:
             err = blocking.get(req, True, feedback)
@@ -54,11 +56,20 @@ def request(url, data=None, feedback=None, content_type="application/json", time
         raise RuntimeError("cancelled")
     if feedback is not None and feedback.isCanceled():
         raise RuntimeError(f"no answer within {timeout} s")
+    no_answer = f"no answer (connection closed after {time.monotonic() - started:.0f} s)"
     if err != QgsBlockingNetworkRequest.ErrorCode.NoError:
         reply = blocking.reply()
         status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        if not bytes(reply.content()) and (not status or 200 <= int(status) < 300):
+            # Closed without a reply, or an empty "200 OK": not a real answer either way.
+            raise RuntimeError(no_answer)
         if status:
             reason = reply.attribute(QNetworkRequest.Attribute.HttpReasonPhraseAttribute) or ""
             raise RuntimeError(f"HTTP {status} {reason}".strip())
         raise RuntimeError(blocking.errorMessage())
-    return bytes(blocking.reply().content())
+    body = bytes(blocking.reply().content())
+    if not body:
+        # The server (or something on the way) closed the connection without answering;
+        # the DEFRA catalogue does this after exactly 60 s when it is struggling.
+        raise RuntimeError(no_answer)
+    return body
