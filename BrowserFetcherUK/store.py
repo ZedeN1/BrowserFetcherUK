@@ -15,6 +15,7 @@ import getpass
 import glob
 import json
 import os
+import re
 import socket
 import threading
 import uuid
@@ -139,15 +140,31 @@ def change_files(folder):
     return sorted(glob.glob(os.path.join(history_dir(folder), "*_changes.csv")), reverse=True)
 
 
+def history_stamp(iso):
+    """'260929_1232Z': UTC, so names from machines in different time zones sort and read alike."""
+    return f"{parse_time(iso).astimezone(timezone.utc):%y%m%d_%H%M}Z"
+
+
+def history_label(path):
+    """Local 'YYYY-MM-DD HH:MM' of a history file (older names without Z are the writer's local time)."""
+    m = re.match(r"(\d{6})_(\d{4})(Z?)_", os.path.basename(path))
+    if not m:
+        return os.path.basename(path)
+    when = datetime.strptime(m.group(1) + m.group(2), "%y%m%d%H%M")
+    if m.group(3):
+        when = when.replace(tzinfo=timezone.utc).astimezone()
+    return f"{when:%Y-%m-%d %H:%M}"
+
+
 def publish(folder, snapshot, change_rows):
     """Make snapshot current: the old one goes to history with the CSV of what changed."""
     hist = history_dir(folder)
     os.makedirs(hist, exist_ok=True)
-    stamp = f"{parse_time(snapshot['created']).astimezone():%y%m%d_%H%M}"
+    stamp = history_stamp(snapshot["created"])
     old = snapshot_path(folder)
     if os.path.exists(old):
         prev = read_json(old) or {}
-        prev_stamp = (f"{parse_time(prev['created']).astimezone():%y%m%d_%H%M}"
+        prev_stamp = (history_stamp(prev["created"])
                       if prev.get("created") else stamp + "_old")
         os.replace(old, os.path.join(hist, f"{prev_stamp}_snapshot.json"))
     write_json(old, snapshot)

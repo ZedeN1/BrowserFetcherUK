@@ -551,9 +551,7 @@ class BrowserFetcherDialog(QDialog):
         if self.status and self.status.reachable:
             where = "shared" if self.status.origin == "shared" else "local"
             for path in store.change_files(self.status.snapshot_folder):
-                stamp = os.path.basename(path)[:11]
-                label = f"20{stamp[:2]}-{stamp[2:4]}-{stamp[4:6]} {stamp[7:9]}:{stamp[9:11]}"
-                self.view_combo.addItem(f"Fetch into the {where} copy on {label}", path)
+                self.view_combo.addItem(f"Fetch into the {where} copy on {store.history_label(path)}", path)
         index = self.view_combo.findData(current) if current else 0
         self.view_combo.setCurrentIndex(max(index, 0))
         self.view_combo.blockSignals(False)

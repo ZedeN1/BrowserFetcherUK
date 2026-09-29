@@ -294,8 +294,14 @@ class FetchTask(_Task):
             for k in old_keys:
                 info[k] = prev_sources[k]
         from . import __version__
+        # Only a slow fetch whose slow-only sources (DEFRA) completed counts as one: otherwise
+        # England is still the fast fetch's, and the copy must not claim otherwise.
+        slow_only = [s for s in self.subtasks if s.source.config.get("use") == "full"]
+        full = self.full and bool(slow_only) and all(s.complete for s in slow_only)
+        if self.full and not full:
+            self.warn("The slow-fetch-only sources did not complete, so this copy counts as a fast fetch")
         self.snapshot = {"created": store.now(), "created_by": store.who(),
-                         "plugin_version": __version__, "full": self.full, "sources": info,
+                         "plugin_version": __version__, "full": full, "sources": info,
                          "datasets": datasets}
         self.rows = changes.diff(connections.dataset_connections(prev_sets, prev_sources),
                                  connections.dataset_connections(datasets, info), self.regions)
